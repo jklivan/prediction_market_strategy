@@ -686,7 +686,7 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
         kept_shorts_by_score = sorted(
             [e for e in to_keep if e["position"]["side"] == "short"],
             key=lambda x: x["score"])
-        while net_imbalance < -tradeable * 0.05 and kept_shorts_by_score:
+        while net_imbalance < -tradeable * 0.10 and kept_shorts_by_score:
             worst = kept_shorts_by_score.pop(0)
             sym = worst["ticker"]
             val = abs(alpaca_held.get(sym, {}).get("market_value", 0))
@@ -705,7 +705,7 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
         kept_longs_by_score = sorted(
             [e for e in to_keep if e["position"]["side"] == "long"],
             key=lambda x: x["score"])
-        while net_imbalance > tradeable * 0.05 and kept_longs_by_score:
+        while net_imbalance > tradeable * 0.10 and kept_longs_by_score:
             worst = kept_longs_by_score.pop(0)
             sym = worst["ticker"]
             val = abs(alpaca_held.get(sym, {}).get("market_value", 0))
