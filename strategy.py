@@ -668,6 +668,57 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
     to_open_short = [e for e in target_shorts if not e["held"]]
     to_keep = [e for e in target_longs + target_shorts if e["held"]]
 
+    # ── 7b. Rebalance: trim kept positions if net exposure drifts too far ──
+    kept_long_val = sum(
+        abs(alpaca_held.get(e["ticker"], {}).get("market_value", 0))
+        for e in to_keep if e["position"]["side"] == "long")
+    kept_short_val = sum(
+        abs(alpaca_held.get(e["ticker"], {}).get("market_value", 0))
+        for e in to_keep if e["position"]["side"] == "short")
+
+    # Project net exposure after planned opens
+    proj_long = kept_long_val + max(half - kept_long_val, 0) if to_open_long else kept_long_val
+    proj_short = kept_short_val + max(half - kept_short_val, 0) if to_open_short else kept_short_val
+    net_imbalance = proj_long - proj_short
+
+    # If short side is too heavy, trim lowest-conviction kept shorts
+    if net_imbalance < -tradeable * 0.10:  # More than 10% of tradeable is imbalanced
+        kept_shorts_by_score = sorted(
+            [e for e in to_keep if e["position"]["side"] == "short"],
+            key=lambda x: x["score"])
+        while net_imbalance < -tradeable * 0.05 and kept_shorts_by_score:
+            worst = kept_shorts_by_score.pop(0)
+            sym = worst["ticker"]
+            val = abs(alpaca_held.get(sym, {}).get("market_value", 0))
+            exits[sym] = {"reason": "REBALANCE", "age": worst["position"]["age_days"],
+                          "detail": f"trimmed to reduce net short exposure (${val:,.0f})"}
+            if sym in kept:
+                del kept[sym]
+            to_keep = [e for e in to_keep if e["ticker"] != sym]
+            to_close.append(sym)
+            proj_short -= val
+            net_imbalance = proj_long - proj_short
+            L.append(f"  [REBALANCE] Closing {sym} short (${val:,.0f}) to reduce net exposure")
+
+    # If long side is too heavy, trim lowest-conviction kept longs
+    elif net_imbalance > tradeable * 0.10:
+        kept_longs_by_score = sorted(
+            [e for e in to_keep if e["position"]["side"] == "long"],
+            key=lambda x: x["score"])
+        while net_imbalance > tradeable * 0.05 and kept_longs_by_score:
+            worst = kept_longs_by_score.pop(0)
+            sym = worst["ticker"]
+            val = abs(alpaca_held.get(sym, {}).get("market_value", 0))
+            exits[sym] = {"reason": "REBALANCE", "age": worst["position"]["age_days"],
+                          "detail": f"trimmed to reduce net long exposure (${val:,.0f})"}
+            if sym in kept:
+                del kept[sym]
+            to_keep = [e for e in to_keep if e["ticker"] != sym]
+            to_close.append(sym)
+            proj_long -= val
+            net_imbalance = proj_long - proj_short
+            L.append(f"  [REBALANCE] Closing {sym} long (${val:,.0f}) to reduce net exposure")
+
     # ── Report: KEPT ──
     L.append("  KEPT POSITIONS (no change):")
     if to_keep:
