@@ -669,6 +669,9 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
     to_keep = [e for e in target_longs + target_shorts if e["held"]]
 
     # ── 7b. Rebalance: trim kept positions if net exposure drifts too far ──
+    tradeable = portfolio_value * PORTFOLIO_ALLOCATION
+    half = tradeable / 2
+
     kept_long_val = sum(
         abs(alpaca_held.get(e["ticker"], {}).get("market_value", 0))
         for e in to_keep if e["position"]["side"] == "long")
