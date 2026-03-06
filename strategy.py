@@ -25,7 +25,7 @@ BASE_URL = "https://primarylogic--pulse-backend-external-api-app.modal.run"
 # Alpaca Paper Trading
 ALPACA_KEY_ID = os.environ.get("APCA_API_KEY_ID", "")
 ALPACA_SECRET = os.environ.get("APCA_API_SECRET_KEY", "")
-ALPACA_BASE = "https://paper-api.alpaca.markets"
+ALPACA_BASE = "https://api.alpaca.markets"
 ALPACA_DATA_BASE = "https://data.alpaca.markets"
 
 MIN_PRICE_DELTA_PCT = 8
