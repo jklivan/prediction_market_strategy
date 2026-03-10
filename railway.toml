@@ -4,5 +4,5 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "python3 strategy.py"
-cronSchedule = "35 14 * * 1-5"
+cronSchedule = "35 13 * * 1-5"
 restartPolicyType = "NEVER"
