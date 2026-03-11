@@ -19,10 +19,20 @@ from urllib.parse import urlencode
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────────────
-API_KEY = os.environ.get("PRIMARYLOGIC_API_KEY", "")
-BASE_URL = "https://primarylogic--pulse-backend-external-api-app.modal.run"
+# Load .env file if present (local development)
+_env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    for line in _env_path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 
-# Alpaca Paper Trading
+# Supabase (replaces PrimaryLogic API)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+# Alpaca Trading
 ALPACA_KEY_ID = os.environ.get("APCA_API_KEY_ID", "")
 ALPACA_SECRET = os.environ.get("APCA_API_SECRET_KEY", "")
 ALPACA_BASE = "https://api.alpaca.markets"
@@ -30,8 +40,7 @@ ALPACA_DATA_BASE = "https://data.alpaca.markets"
 
 MIN_PRICE_DELTA_PCT = 8
 MIN_VOLUME_POLYMARKET = 50000
-LOOKBACK_HOURS = 24
-MAX_PAGES = 10
+LOOKBACK_HOURS = 48
 
 # Position sizing
 PORTFOLIO_ALLOCATION = 0.60     # Use 60% of portfolio for trades
@@ -269,30 +278,92 @@ THEME_MAP = {
 }
 
 
-def api_get(path, params=None):
-    url = f"{BASE_URL}{path}"
-    if params:
-        url += "?" + urlencode({k: v for k, v in params.items() if v is not None})
-    req = Request(url, headers={"Authorization": f"Bearer {API_KEY}"})
+def supabase_query(table, select="*", filters=None, order=None, limit=1000):
+    """Query Supabase REST API directly."""
+    url = f"{SUPABASE_URL}/rest/v1/{table}?select={select}"
+    if filters:
+        for f in filters:
+            url += f"&{f}"
+    if order:
+        url += f"&order={order}"
+    url += f"&limit={limit}"
+    req = Request(url, headers={
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json",
+    })
     with urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 
 
-def fetch_all_pages(path, params, max_pages=MAX_PAGES):
-    all_items = []
-    cursor = 0
-    for _ in range(max_pages):
-        p = {**params, "cursor": cursor}
-        resp = api_get(path, p)
-        items = resp.get("data", [])
-        if not items:
-            break
-        all_items.extend(items)
-        next_cursor = resp.get("next_cursor")
-        if next_cursor is None:
-            break
-        cursor = next_cursor
-    return all_items
+def fetch_prediction_markets(source_type, since_iso, limit=1000):
+    """Fetch Kalshi or Polymarket content from Supabase."""
+    rows = supabase_query(
+        "standardized_content",
+        select="*",
+        filters=[
+            f"source_type=eq.{source_type}",
+            f"updated_at=gte.{since_iso}",
+        ],
+        order="updated_at.desc",
+        limit=limit,
+    )
+    # Reshape to match the old API format
+    items = []
+    for row in rows:
+        item = {
+            "id": row.get("id", ""),
+            "summary": row.get("summary", ""),
+            "date": row.get("date", ""),
+            "metadata": row.get("metadata", {}),
+            "kg_relevant_tickers": [],
+        }
+        items.append(item)
+    return items
+
+
+def fetch_ticker_signals_supabase(tickers, since_iso):
+    """Fetch corroborating signals for tickers from Supabase."""
+    signals = []
+    for ticker in tickers[:5]:
+        try:
+            rows = supabase_query(
+                "standardized_content_tickers",
+                select="standardized_content_id,ticker,relevance_score,impact_score",
+                filters=[
+                    f"ticker=eq.{ticker}",
+                    f"relevance_score=gte.0.4",
+                ],
+                order="impact_score.desc",
+                limit=5,
+            )
+            for row in rows:
+                content_id = row.get("standardized_content_id")
+                if not content_id:
+                    continue
+                content_rows = supabase_query(
+                    "standardized_content",
+                    select="source_type,summary,date",
+                    filters=[
+                        f"id=eq.{content_id}",
+                        f"date=gte.{since_iso}",
+                        f"source_type=neq.Kalshi",
+                        f"source_type=neq.Polymarket",
+                    ],
+                    limit=1,
+                )
+                for cr in content_rows:
+                    signals.append({
+                        "ticker": ticker,
+                        "source_type": cr.get("source_type", ""),
+                        "summary": cr.get("summary", "")[:200],
+                        "impact": row.get("impact_score", 0) or 0,
+                        "relevance": row.get("relevance_score", 0) or 0,
+                        "sentiment": "positive" if (row.get("impact_score", 0) or 0) > 0 else "negative",
+                    })
+        except Exception:
+            pass
+    return signals
 
 
 # ── Parsers ─────────────────────────────────────────────────────────────────
@@ -1063,13 +1134,8 @@ def get_ticker_signals(tickers, since_iso):
 
 # ── Main ────────────────────────────────────────────────────────────────────
 def run_strategy():
-    if not API_KEY:
-        print("ERROR: Set PRIMARYLOGIC_API_KEY environment variable")
-        sys.exit(1)
-
-    health = api_get("/v1/health")
-    if health.get("data", {}).get("status") != "ok":
-        print(f"API health check failed: {health}")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("ERROR: Set SUPABASE_URL and SUPABASE_KEY environment variables")
         sys.exit(1)
 
     now = datetime.now(timezone.utc)
@@ -1078,15 +1144,9 @@ def run_strategy():
 
     print(f"Scanning prediction markets... ({since_iso} → now)")
 
-    # ── Fetch ──
-    kalshi_raw = fetch_all_pages("/v1/content", {
-        "source_types": "Kalshi", "since": since_iso, "limit": 100,
-        "sort_by": "date", "sort_direction": "desc",
-    })
-    poly_raw = fetch_all_pages("/v1/content", {
-        "source_types": "Polymarket", "since": since_iso, "limit": 100,
-        "sort_by": "date", "sort_direction": "desc",
-    })
+    # ── Fetch from Supabase ──
+    kalshi_raw = fetch_prediction_markets("Kalshi", since_iso)
+    poly_raw = fetch_prediction_markets("Polymarket", since_iso)
     print(f"  Kalshi: {len(kalshi_raw)} | Polymarket: {len(poly_raw)}")
 
     # ── Parse & filter ──
@@ -1173,7 +1233,7 @@ def run_strategy():
     # ── Get corroborating signals for top picks ──
     print("  Fetching corroborating signals for top stock picks...")
     top_tickers = [tk for tk, _ in sorted_recs[:15] if not any(c in tk for c in [" ", "."])]
-    corroborating = get_ticker_signals(top_tickers, since_iso)
+    corroborating = fetch_ticker_signals_supabase(top_tickers, since_iso)
     corr_by_ticker = {}
     for s in corroborating:
         corr_by_ticker.setdefault(s["ticker"], []).append(s)

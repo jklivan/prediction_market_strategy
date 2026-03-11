@@ -3,3 +3,4 @@ __pycache__/
 positions.json
 daily_reports/
 run_daily.sh
+.env
