@@ -54,6 +54,25 @@ POSITIONS_FILE = _DATA_DIR / "positions.json"
 OUTPUT_DIR = _DATA_DIR / "daily_reports"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# ── Wash Sale Rule ────────────────────────────────────────────────────────
+# IRS "substantially identical" securities — only securities tracking the
+# same underlying index/asset are grouped.  Different companies in the same
+# sector (e.g., AAL vs DAL) are NOT substantially identical.
+# If a ticker is not in this dict, it falls back to exact-ticker matching.
+WASH_SALE_DAYS = 31
+WASH_SALE_GROUPS = {
+    # S&P 500 ETFs — add VOO, IVV here if they ever enter the universe
+    "SPY": "sp500_etf",
+    # Gold ETFs — add IAU here if added
+    "GLD": "gold_etf",
+    # 20+ Year Treasury ETFs — add VGLT here if added
+    "TLT": "lt_treasury_etf",
+    # TIPS ETFs — add VTIP here if added
+    "TIP": "tips_etf",
+    # GSE preferred/common  — FNMA and FMCC are different companies but
+    # OTC common shares of Fannie/Freddie are distinct, so no grouping.
+}
+
 
 def load_positions():
     """Load persistent position state from JSON file."""
@@ -61,8 +80,8 @@ def load_positions():
         try:
             return json.loads(POSITIONS_FILE.read_text())
         except (json.JSONDecodeError, IOError):
-            return {"positions": {}, "last_run": None}
-    return {"positions": {}, "last_run": None}
+            return {"positions": {}, "exit_history": [], "last_run": None}
+    return {"positions": {}, "exit_history": [], "last_run": None}
 
 
 def save_positions(data):
@@ -585,6 +604,27 @@ def submit_alpaca_order(ticker, side, notional=None, qty=None):
     return alpaca_request("POST", "/v2/orders", order)
 
 
+def is_wash_sale_blocked(ticker, exit_history):
+    """Check if entering this ticker would trigger a wash sale.
+
+    Returns (blocked: bool, blocking_detail: str or None).
+    """
+    group = WASH_SALE_GROUPS.get(ticker, ticker)
+    today = datetime.now(timezone.utc).date()
+    cutoff = today - timedelta(days=WASH_SALE_DAYS)
+    for ex in exit_history:
+        exit_date = datetime.strptime(ex["exit_date"], "%Y-%m-%d").date()
+        if exit_date >= cutoff:
+            exit_group = ex.get("group", ex["ticker"])
+            if exit_group == group or ex["ticker"] == ticker:
+                days_left = WASH_SALE_DAYS - (today - exit_date).days
+                same_group = exit_group == group and ex["ticker"] != ticker
+                suffix = f" [same group: {group}]" if same_group else ""
+                return True, (f"wash sale: {ex['ticker']} exited {ex['exit_date']} "
+                              f"at ${ex['realized_pl']:+,.0f} ({days_left}d left){suffix}")
+    return False, None
+
+
 def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
     """Portfolio management with position holding up to MAX_HOLD_DAYS.
 
@@ -617,6 +657,12 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
     # ── 1. Load positions.json ──
     pos_data = load_positions()
     held_positions = pos_data.get("positions", {})
+
+    # Load and prune exit history (wash sale tracking)
+    exit_history = pos_data.get("exit_history", [])
+    today = datetime.now(timezone.utc).date()
+    exit_history = [e for e in exit_history
+                    if (today - datetime.strptime(e["exit_date"], "%Y-%m-%d").date()).days <= 35]
 
     # ── 2. Reconcile with actual Alpaca positions ──
     alpaca_positions = get_alpaca_positions()
@@ -664,7 +710,6 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
     held_positions = {sym: pos for sym, pos in held_positions.items() if sym in alpaca_held}
 
     # ── 5. Evaluate held positions ──
-    today = datetime.now(timezone.utc).date()
     exits = {}   # ticker -> {reason, age, detail}
     kept = {}    # ticker -> position info with age_days
 
@@ -723,13 +768,22 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
         else:
             short_pool.append(entry)
 
-    # Add new candidates not already held (exited tickers CAN re-enter if still recommended)
+    # Add new candidates not already held, checking wash sale rule
+    wash_sale_blocks = []
     for tk, r in buys:
         if r["conviction"] >= MIN_CONVICTION_TO_TRADE and tk not in kept:
+            blocked, detail = is_wash_sale_blocked(tk, exit_history)
+            if blocked:
+                wash_sale_blocks.append((tk, "LONG", detail))
+                continue
             long_pool.append({"ticker": tk, "score": r["conviction"], "held": False, "rec": r})
 
     for tk, r in sells:
         if r["conviction"] >= MIN_CONVICTION_TO_TRADE and tk not in kept:
+            blocked, detail = is_wash_sale_blocked(tk, exit_history)
+            if blocked:
+                wash_sale_blocks.append((tk, "SHORT", detail))
+                continue
             short_pool.append({"ticker": tk, "score": r["conviction"], "held": False, "rec": r})
 
     # Rank and take top N from each side
@@ -753,6 +807,19 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
     to_open_long = [e for e in target_longs if not e["held"]]
     to_open_short = [e for e in target_shorts if not e["held"]]
     to_keep = [e for e in target_longs + target_shorts if e["held"]]
+
+    # Record losing exits for wash sale tracking
+    for sym in to_close:
+        alpaca_info = alpaca_held.get(sym, {})
+        pl = alpaca_info.get("unrealized_pl", 0)
+        if pl < 0:
+            exit_history.append({
+                "ticker": sym,
+                "side": held_positions.get(sym, {}).get("side", "long"),
+                "exit_date": today.isoformat(),
+                "realized_pl": pl,
+                "group": WASH_SALE_GROUPS.get(sym, sym),
+            })
 
     # ── 7b. Rebalance: trim kept positions if net exposure drifts too far ──
     tradeable = portfolio_value * PORTFOLIO_ALLOCATION
@@ -807,6 +874,13 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
             proj_long -= val
             net_imbalance = proj_long - proj_short
             L.append(f"  [REBALANCE] Closing {sym} long (${val:,.0f}) to reduce net exposure")
+
+    # ── Report: WASH SALE BLOCKS ──
+    if wash_sale_blocks:
+        L.append("  WASH SALE BLOCKS:")
+        for tk, side, detail in wash_sale_blocks:
+            L.append(f"    {tk:<6} {side:<6} blocked — {detail}")
+        L.append("")
 
     # ── Report: KEPT ──
     L.append("  KEPT POSITIONS (no change):")
@@ -913,14 +987,18 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
         attempted = set()
         short_filled = 0
 
-        # Build overflow list from all sell candidates not already held/exited
-        all_sell_overflow = [
-            {"ticker": tk, "score": r["conviction"], "held": False, "rec": r}
-            for tk, r in sells
-            if r["conviction"] >= MIN_CONVICTION_TO_TRADE
-            and tk not in kept and tk not in exits
-            and tk not in {e["ticker"] for e in to_open_short}
-        ]
+        # Build overflow list from all sell candidates not already held/exited/blocked
+        all_sell_overflow = []
+        for tk, r in sells:
+            if (r["conviction"] >= MIN_CONVICTION_TO_TRADE
+                    and tk not in kept and tk not in exits
+                    and tk not in {e["ticker"] for e in to_open_short}):
+                blocked, detail = is_wash_sale_blocked(tk, exit_history)
+                if blocked:
+                    wash_sale_blocks.append((tk, "SHORT", detail))
+                    continue
+                all_sell_overflow.append(
+                    {"ticker": tk, "score": r["conviction"], "held": False, "rec": r})
         candidates_to_try = to_open_short + all_sell_overflow
 
         for entry in candidates_to_try:
@@ -997,8 +1075,10 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
             "trigger_markets": pos.get("trigger_markets", []),
         }
 
-    save_positions({"positions": new_positions})
+    save_positions({"positions": new_positions, "exit_history": exit_history})
     L.append(f"  State saved to {POSITIONS_FILE.name}: {len(new_positions)} positions tracked")
+    if exit_history:
+        L.append(f"  Wash sale exit history: {len(exit_history)} loss exits tracked")
 
     return executed
 
