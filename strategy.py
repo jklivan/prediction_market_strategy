@@ -678,11 +678,26 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
                           "detail": f"held {age_days}d (max {MAX_HOLD_DAYS})"}
             continue
 
-        # 5b. Check signal reversal
+        # 5b. Check signal reversal — but override if today's scan still recommends
         reversed_flag, detail = check_signal_reversal(pos, todays_markets)
         if reversed_flag:
-            exits[sym] = {"reason": "REVERSED", "age": age_days, "detail": detail}
-            continue
+            # Check if today's fresh scan still recommends this ticker
+            still_recommended = False
+            if pos["side"] == "long":
+                for tk, r in buys:
+                    if tk == sym and r.get("conviction", 0) >= MIN_CONVICTION_TO_TRADE:
+                        still_recommended = True
+                        break
+            else:
+                for tk, r in sells:
+                    if tk == sym and r.get("conviction", 0) >= MIN_CONVICTION_TO_TRADE:
+                        still_recommended = True
+                        break
+            if still_recommended:
+                L.append(f"  [OVERRIDE] {sym} trigger reversed ({detail}) but still recommended today — keeping")
+            else:
+                exits[sym] = {"reason": "REVERSED", "age": age_days, "detail": detail}
+                continue
 
         # Surviving position
         kept[sym] = {**pos, "age_days": age_days}
@@ -708,13 +723,13 @@ def manage_portfolio(buys, sells, todays_markets, stock_recs, L):
         else:
             short_pool.append(entry)
 
-    # Add new candidates not already held or being exited
+    # Add new candidates not already held (exited tickers CAN re-enter if still recommended)
     for tk, r in buys:
-        if r["conviction"] >= MIN_CONVICTION_TO_TRADE and tk not in kept and tk not in exits:
+        if r["conviction"] >= MIN_CONVICTION_TO_TRADE and tk not in kept:
             long_pool.append({"ticker": tk, "score": r["conviction"], "held": False, "rec": r})
 
     for tk, r in sells:
-        if r["conviction"] >= MIN_CONVICTION_TO_TRADE and tk not in kept and tk not in exits:
+        if r["conviction"] >= MIN_CONVICTION_TO_TRADE and tk not in kept:
             short_pool.append({"ticker": tk, "score": r["conviction"], "held": False, "rec": r})
 
     # Rank and take top N from each side
