@@ -55,22 +55,49 @@ OUTPUT_DIR = _DATA_DIR / "daily_reports"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ── Wash Sale Rule ────────────────────────────────────────────────────────
-# IRS "substantially identical" securities — only securities tracking the
-# same underlying index/asset are grouped.  Different companies in the same
-# sector (e.g., AAL vs DAL) are NOT substantially identical.
+# IRS "substantially identical" securities grouped together.  Tickers in the
+# same group are subject to the same 31-day wash sale window.
 # If a ticker is not in this dict, it falls back to exact-ticker matching.
 WASH_SALE_DAYS = 31
 WASH_SALE_GROUPS = {
-    # S&P 500 ETFs — add VOO, IVV here if they ever enter the universe
-    "SPY": "sp500_etf",
-    # Gold ETFs — add IAU here if added
-    "GLD": "gold_etf",
-    # 20+ Year Treasury ETFs — add VGLT here if added
-    "TLT": "lt_treasury_etf",
-    # TIPS ETFs — add VTIP here if added
-    "TIP": "tips_etf",
-    # GSE preferred/common  — FNMA and FMCC are different companies but
-    # OTC common shares of Fannie/Freddie are distinct, so no grouping.
+    # Energy / Oil — XLE is the sector ETF holding XOM/CVX/OXY
+    "XLE": "energy_oil", "XOM": "energy_oil", "CVX": "energy_oil", "OXY": "energy_oil",
+    # Airlines — used identically in gas_prices themes
+    "AAL": "airlines", "DAL": "airlines",
+    # Steel — both US steel, identical tariff theme exposure
+    "STLD": "steel", "NUE": "steel",
+    # Banks — KRE holds JPM/GS (sector ETF ↔ components)
+    "KRE": "banks", "JPM": "banks", "GS": "banks",
+    # Nuclear — all nuclear plays used together in nuclear themes
+    "CEG": "nuclear", "VST": "nuclear", "CCJ": "nuclear", "SMR": "nuclear", "OKLO": "nuclear",
+    # Long-duration bonds
+    "TLT": "long_bonds",
+    # TIPS
+    "TIP": "tips",
+    # Gold
+    "GLD": "gold",
+    # Tech / AI compute
+    "NVDA": "ai_compute", "AVGO": "ai_compute",
+    # Software
+    "MSFT": "msft",
+    # China exposure
+    "FXI": "china",
+    # Utilities
+    "XLU": "utilities",
+    # Growth / Innovation
+    "ARKK": "growth_innov",
+    # Defense contractors — all gov-contractor shorts in gov_shutdown theme
+    "GD": "defense", "BAH": "defense", "LDOS": "defense", "LMT": "defense",
+    # Consumer / Tariff-exposed retail (individual — only blocked by exact ticker)
+    "AAPL": "aapl", "NKE": "nke", "WMT": "wmt",
+    # Broad market
+    "SPY": "broad_market", "IWM": "small_cap", "XLI": "industrials",
+    # Housing / GSE — FNMA and FMCC always trade as a pair (fannie_ipo theme)
+    "FNMA": "gse", "FMCC": "gse", "XHB": "homebuilders",
+    # Media — WBD/PARA both media M&A targets
+    "WBD": "media", "PARA": "media",
+    # Others (unique — only blocked by exact ticker)
+    "UBER": "uber", "TSLA": "tsla", "DBA": "dba", "COST": "cost", "XLY": "xly",
 }
 
 
